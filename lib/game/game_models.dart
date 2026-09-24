@@ -29,7 +29,7 @@ const double kSpringChance = 0.13;
 
 /// Cracked brown platforms that break shortly after being landed on.
 const double kBreakableChance = 0.18;
-const double kBreakableGravity = 1400.0;
+const double kBreakableGravity = 2200.0;
 const double kBreakableDelay = 0.25;
 
 const int kMaxParticles = 160;
@@ -67,7 +67,7 @@ class DoodlePlatform {
       fallVy += kBreakableGravity * dt;
       y += fallVy * dt;
       rot += dt * 3.0;
-      if (fallVy > 900) fallVy = 900;
+      if (fallVy > 1200) fallVy = 1200;
       return;
     }
     if (moving) {

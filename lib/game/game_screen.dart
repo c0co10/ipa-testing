@@ -89,7 +89,9 @@ class _GameScreenState extends State<GameScreen>
   void _onTick(Duration elapsed) {
     final dt = (elapsed - _lastTick).inMicroseconds / 1000000;
     _lastTick = elapsed;
-    _update(dt.clamp(0.0, 1.0 / 30.0));
+    // Cap the step tight enough that a fall can never tunnel past a
+    // platform in one frame (~25px max at terminal velocity).
+    _update(dt.clamp(0.0, 1.0 / 60.0));
     setState(() {});
   }
 
@@ -285,14 +287,21 @@ class _GameScreenState extends State<GameScreen>
     if (player.vy > 0) {
       final bottom = player.y + kPlayerHeight;
       final centerX = player.x + kPlayerWidth / 2;
+      // Horizontal center at the START of this frame, so a fast sideways
+      // glide can't skip a landing it swept across in one discrete step.
+      final centerStartX = player.x - player.vx * dt + kPlayerWidth / 2;
       for (final platform in _state.platforms) {
         if (platform.isBroken) continue;
         final plBottom = platform.y; // top edge of platform (y is top)
+        // Never land on a platform that has already scrolled below the
+        // visible screen - that's what made the player bounce "on air".
+        if (plBottom - _state.shift > _state.screenHeight) continue;
         if (prevBottom <= plBottom && bottom >= plBottom) {
-          // Only count a real landing: the player's horizontal center must
-          // be over the platform. A 1px corner graze is not a jump.
-          final centerOver = centerX > platform.x &&
-              centerX < platform.x + kPlatformWidth;
+          final platLeft = platform.x;
+          final platRight = platform.x + kPlatformWidth;
+          final centerOver =
+              (centerX > platLeft && centerX < platRight) ||
+                  (centerStartX > platLeft && centerStartX < platRight);
           if (!centerOver) continue;
           if (platform.hasSpring) {
             _audio.spring();
