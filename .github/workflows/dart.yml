@@ -12,14 +12,54 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       - run: flutter build ipa --no-codesign
-      - name: List build output
+      - name: Export unsigned IPA
         run: |
-          find build/ios -maxdepth 4 -mindepth 1 | head -60
-          find build -name "*.ipa" -o -name "*.xcarchive" | head -20
+          set -euo pipefail
+          APP="$(find build/ios/archive -type d -name '*.app' 2>/dev/null | head -1 || true)"
+          echo "Found app bundle: ${APP:-none}"
+          IPK=""
+          if [ -d "build/ios/archive/Runner.xcarchive" ] && xcodebuild -exportArchive \
+              -archivePath build/ios/archive/Runner.xcarchive \
+              -exportPath build/ios/export \
+              -exportOptionsPlist <(cat <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>development</string>
+  <key>signingStyle</key>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>-</string>
+</dict>
+</plist>
+EOF
+) CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO > export.log 2>&1; then
+            IPK="$(find build/ios/export -name '*.ipa' 2>/dev/null | head -1 || true)"
+            echo "xcodebuild export OK: ${IPK:-none}"
+          else
+            echo "xcodebuild export failed, falling back to manual packaging:"
+            tail -20 export.log 2>/dev/null || true
+          fi
+          if [ -z "$IPK" ] && [ -n "$APP" ]; then
+            echo "Packaging Payload manually"
+            rm -rf build/ios/ipa
+            mkdir -p build/ios/ipa/Payload
+            cp -R "$APP" build/ios/ipa/Payload/
+            (cd build/ios/ipa && zip -qr ../Runner.ipa Payload)
+            IPK="build/ios/Runner.ipa"
+            echo "Manual packaging OK"
+          fi
+          if [ -n "$IPK" ]; then
+            cp "$IPK" build/ios/Runner.ipa
+            ls -la build/ios/Runner.ipa
+          else
+            echo "NO IPA PRODUCED"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: doodle-jump-ipa
-          if-no-files-found: warn
-          path: |
-            build/ios/ipa/*.ipa
-            build/ios/archive/**
+          path: build/ios/Runner.ipa
+          if-no-files-found: error
