@@ -12,7 +12,14 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       - run: flutter build ipa --no-codesign
+      - name: List build output
+        run: |
+          find build/ios -maxdepth 4 -mindepth 1 | head -60
+          find build -name "*.ipa" -o -name "*.xcarchive" | head -20
       - uses: actions/upload-artifact@v4
         with:
           name: doodle-jump-ipa
-          path: build/ios/ipa/*.ipa
+          if-no-files-found: warn
+          path: |
+            build/ios/ipa/*.ipa
+            build/ios/archive/**
