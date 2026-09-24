@@ -1,0 +1,18 @@
+name: Build IPA
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter create . --project-name doodle_jump
+      - run: flutter pub get
+      - run: flutter test
+      - run: flutter build ipa --no-codesign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: doodle-jump-ipa
+          path: build/ios/ipa/*.ipa
