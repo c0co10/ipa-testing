@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'game_audio.dart';
 import 'game_models.dart';
 import 'game_painter.dart';
 
@@ -18,25 +22,68 @@ class GameScreen extends StatefulWidget {
 class _GameScreenState extends State<GameScreen>
     with SingleTickerProviderStateMixin {
   final GameState _state = GameState();
+  final GameAudio _audio = GameAudio.instance;
   final math.Random _rng = math.Random();
 
   late final Ticker _ticker;
+  StreamSubscription<AccelerometerEvent>? _accelSub;
   Duration _lastTick = Duration.zero;
   double _topCursorY = 0;
   bool _sized = false;
   bool _leftHeld = false;
   bool _rightHeld = false;
+  bool _tiltAvailable = false;
 
   @override
   void initState() {
     super.initState();
     _ticker = createTicker(_onTick)..start();
+    _loadBestScore();
+    _initSensors();
+    _audio.init();
   }
 
   @override
   void dispose() {
     _ticker.dispose();
+    _accelSub?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadBestScore() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final best = prefs.getInt('bestScore') ?? 0;
+      if (mounted) {
+        setState(() => _state.best = best);
+      }
+    } catch (_) {}
+  }
+
+  void _saveBestScore(int value) {
+    try {
+      SharedPreferences.getInstance().then((p) => p.setInt('bestScore', value));
+    } catch (_) {}
+  }
+
+  void _initSensors() {
+    try {
+      _accelSub = accelerometerEventStream().listen(
+        (event) {
+          _tiltAvailable = true;
+          // Tilting the phone right gives a negative x (gravity vector flips),
+          // so negate to move the doodle right when you tilt right.
+          _state.tilt = (-event.x / 9.81).clamp(-1.0, 1.0);
+        },
+        onError: (_) {
+          _tiltAvailable = false;
+          _state.tilt = 0;
+        },
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _tiltAvailable = false;
+    }
   }
 
   void _onTick(Duration elapsed) {
@@ -54,25 +101,66 @@ class _GameScreenState extends State<GameScreen>
     _resetGame();
   }
 
+  double _gap() => kMinGap + _rng.nextDouble() * (kMaxGap - kMinGap);
+
+  DoodlePlatform _makePlatform(
+    double y, {
+    bool safe = false,
+  }) {
+    final moving = !safe && _rng.nextDouble() < kMovingPlatformChance;
+    final breakable = !safe && _rng.nextDouble() < kBreakableChance;
+    final hasSpring = !safe &&
+        !breakable &&
+        _rng.nextDouble() < kSpringChance;
+    final platform = DoodlePlatform(
+      x: _rng.nextDouble() * (_state.screenWidth - kPlatformWidth),
+      y: y,
+      moving: moving,
+      breakable: breakable,
+      hasSpring: hasSpring,
+    );
+    if (moving) {
+      platform.vx = kPlatformSpeedMin +
+          _rng.nextDouble() * (kPlatformSpeedMax - kPlatformSpeedMin);
+      platform.dir = _rng.nextBool() ? 1 : -1;
+    }
+    return platform;
+  }
+
   void _resetGame() {
     final w = _state.screenWidth;
 
     _state.platforms.clear();
+    _state.particles.clear();
     _state.score = 0;
     _state.shift = 0;
     _state.moveDir = 0;
+    _state.tilt = 0;
+    _state.shake = 0;
+    _state.banner = null;
+    _state.lastBannerScore = 0;
+    _state.time = 0;
     _leftHeld = false;
     _rightHeld = false;
 
     final bottomY = _state.screenHeight - kGroundFloorOffset;
     _state.platforms.add(
-      DoodlePlatform(x: (w - kPlatformWidth) / 2, y: bottomY),
+      DoodlePlatform(
+        x: (w - kPlatformWidth) / 2,
+        y: bottomY,
+        moving: false,
+        breakable: false,
+        hasSpring: false,
+      ),
     );
 
     var cursor = bottomY;
+    var safeCount = 0;
     while (cursor > -kMaxGap) {
       cursor -= _gap();
-      _state.platforms.add(_makePlatform(cursor));
+      final safe = safeCount < 4;
+      _state.platforms.add(_makePlatform(cursor, safe: safe));
+      safeCount++;
     }
     _topCursorY = cursor;
 
@@ -84,46 +172,93 @@ class _GameScreenState extends State<GameScreen>
       ..facingRight = true;
   }
 
-  double _gap() => kMinGap + _rng.nextDouble() * (kMaxGap - kMinGap);
-
-  DoodlePlatform _makePlatform(double y) {
-    final moving = _rng.nextDouble() < kMovingPlatformChance;
-    final platform = DoodlePlatform(
-      x: _rng.nextDouble() * (_state.screenWidth - kPlatformWidth),
-      y: y,
-      moving: moving,
-    );
-    if (moving) {
-      platform.vx =
-          kPlatformSpeedMin + _rng.nextDouble() * (kPlatformSpeedMax - kPlatformSpeedMin);
-      platform.dir = _rng.nextBool() ? 1 : -1;
-    }
-    return platform;
-  }
-
   void _startGame() {
     if (_state.status == GameStatus.ready) {
-      setState(() => _state.status = GameStatus.playing);
+      setState(() {
+        _state.status = GameStatus.playing;
+        _state.time = 0;
+      });
+      _audio.startMusic();
     } else if (_state.status == GameStatus.dead) {
       setState(() {
         _resetGame();
         _state.status = GameStatus.playing;
       });
+      _audio.startMusic();
+    }
+  }
+
+  void _toggleSound() {
+    setState(() {
+      _state.soundOn = !_state.soundOn;
+      _audio.muted = !_state.soundOn;
+    });
+    try {
+      SharedPreferences.getInstance()
+          .then((p) => p.setBool('soundOn', _state.soundOn));
+    } catch (_) {}
+  }
+
+  void _burst(
+    double x,
+    double y,
+    Color color,
+    int count,
+    double speed, {
+    double upward = 120,
+  }) {
+    final list = _state.particles;
+    for (var i = 0; i < count; i++) {
+      if (list.length >= kMaxParticles) break;
+      final angle = _rng.nextDouble() * 2 * math.pi;
+      final spd = speed * (0.4 + _rng.nextDouble());
+      list.add(
+        Particle(
+          x: x + (_rng.nextDouble() - 0.5) * 10,
+          y: y,
+          vx: math.cos(angle) * spd,
+          vy: math.sin(angle) * spd - upward,
+          life: 0.35 + _rng.nextDouble() * 0.35,
+          maxLife: 0.7,
+          size: 2.2 + _rng.nextDouble() * 2.2,
+          color: color,
+        ),
+      );
     }
   }
 
   void _update(double dt) {
     if (_state.status != GameStatus.playing || dt <= 0) return;
 
-    _state.cloudPhase += dt;
+    _state.time += dt;
+    if (_state.bannerTimer > 0) {
+      _state.bannerTimer -= dt;
+      if (_state.bannerTimer <= 0) _state.banner = null;
+    }
+
+    // Screen shake decays.
+    if (_state.shake > 0) {
+      _state.shake -= dt * 26;
+      if (_state.shake <= 0) _state.shake = 0;
+      if (_state.shake > 0) {
+        _state.shakeX = (_rng.nextDouble() - 0.5) * 2 * _state.shake;
+        _state.shakeY = (_rng.nextDouble() - 0.5) * 2 * _state.shake;
+      } else {
+        _state.shakeX = 0;
+        _state.shakeY = 0;
+      }
+    }
 
     final player = _state.player;
 
     player.vy += kGravity * dt;
     if (player.vy > kMaxFallSpeed) player.vy = kMaxFallSpeed;
 
-    final target = kMaxHorizontalSpeed * _state.moveDir;
-    player.vx += (target - player.vx) * math.min(1.0, 8.0 * dt);
+    final target = _state.moveDir != 0
+        ? _state.moveDir.toDouble()
+        : (_tiltAvailable ? _state.tilt : 0);
+    player.vx += (target * kMaxHorizontalSpeed - player.vx) *
+        math.min(1.0, 10.0 * dt);
     player.x += player.vx * dt;
     if (player.x > _state.screenWidth) {
       player.x -= _state.screenWidth + kPlayerWidth;
@@ -132,17 +267,73 @@ class _GameScreenState extends State<GameScreen>
     }
     if (target != 0) player.facingRight = target > 0;
 
+    // Rocket trail while soaring.
+    if (player.vy < -250) {
+      _burst(
+        player.x + kPlayerWidth / 2,
+        player.y + kPlayerHeight - 2,
+        Colors.white.withOpacity(0.6),
+        1,
+        20,
+        upward: 0,
+      );
+    }
+
     final prevBottom = player.y + kPlayerHeight;
     player.y += player.vy * dt;
 
     if (player.vy > 0) {
       final bottom = player.y + kPlayerHeight;
       for (final platform in _state.platforms) {
-        if (prevBottom <= platform.y && bottom >= platform.y) {
-          if (player.x + kPlayerWidth > platform.x &&
-              player.x < platform.x + kPlatformWidth) {
-            player.y = platform.y - kPlayerHeight;
+        final plBottom = platform.y; // top edge of platform (y is top)
+        if (prevBottom <= plBottom && bottom >= plBottom) {
+          final overlapping = player.x + kPlayerWidth > platform.x &&
+              player.x < platform.x + kPlatformWidth;
+          if (overlapping && platform.hasSpring) {
+            _audio.spring();
+            _state.shake = math.max(_state.shake, 5);
+            _burst(
+              platform.x + kPlatformWidth / 2,
+              plBottom,
+              GamePalette.springRed,
+              12,
+              180,
+              upward: 60,
+            );
+            player.y = plBottom - kPlayerHeight;
+            player.vy = kSpringJumpVelocity;
+            platform.hasSpring = false;
+            break;
+          }
+          if (overlapping) {
+            _audio.jump();
+            player.y = plBottom - kPlayerHeight;
             player.vy = kJumpVelocity;
+            if (platform.breakable && !platform.isBroken) {
+              platform.isBroken = true;
+              _audio.breakPlatform();
+              _state.shake = math.max(_state.shake, 4);
+              _burst(
+                platform.x + kPlatformWidth / 2,
+                plBottom,
+                GamePalette.breakableBottom,
+                10,
+                140,
+                upward: 140,
+              );
+            } else {
+              final color = platform.moving
+                  ? GamePalette.movingTop
+                  : GamePalette.platformTop;
+              _burst(
+                platform.x + kPlatformWidth / 2,
+                plBottom,
+                color,
+                6,
+                90,
+                upward: 40,
+              );
+            }
             break;
           }
         }
@@ -153,11 +344,29 @@ class _GameScreenState extends State<GameScreen>
       platform.update(dt, _state.screenWidth);
     }
 
+    // Age out particles.
+    _state.particles.removeWhere((p) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 500 * dt;
+      p.life -= dt;
+      return p.life <= 0;
+    });
+
     final screenY = player.y - _state.shift;
     if (screenY < _state.screenHeight * kCameraRatio) {
       _state.shift = player.y - _state.screenHeight * kCameraRatio;
       final climbed = math.max(0, ((-_state.shift) / 90.0).floor());
-      if (climbed > _state.score) _state.score = climbed;
+      if (climbed > _state.score) {
+        _state.score = climbed;
+        if (climbed > 0 &&
+            climbed % kScoreStep == 0 &&
+            climbed > _state.lastBannerScore) {
+          _state.lastBannerScore = climbed;
+          _state.banner = '+${_formatScore(climbed.toInt())}';
+          _state.bannerTimer = 1.4;
+        }
+      }
     }
 
     while (_topCursorY - kMaxGap > _state.shift) {
@@ -166,12 +375,18 @@ class _GameScreenState extends State<GameScreen>
     }
 
     _state.platforms.removeWhere(
-      (platform) => platform.y - _state.shift > _state.screenHeight + 60.0,
+      (platform) => platform.y - _state.shift > _state.screenHeight + 80.0,
     );
 
     if (screenY > _state.screenHeight + kPlayerHeight * 2) {
-      if (_state.score > _state.best) _state.best = _state.score;
+      if (_state.score > _state.best) {
+        _state.best = _state.score;
+        _saveBestScore(_state.best);
+      }
+      _audio.gameOver();
+      _state.shake = 6;
       setState(() => _state.status = GameStatus.dead);
+      _state.shake = 0;
       _lastTick = Duration.zero;
     }
   }
@@ -228,7 +443,7 @@ class _GameScreenState extends State<GameScreen>
     _initSize(size);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF6EC6FF),
+      backgroundColor: GamePalette.skyTop,
       body: Focus(
         autofocus: true,
         onKeyEvent: _handleKeyEvent,
@@ -251,25 +466,42 @@ class _GameScreenState extends State<GameScreen>
 
   Widget _buildHud() {
     return Positioned(
-      top: 28,
+      top: 0,
       left: 0,
       right: 0,
       child: IgnorePointer(
-        child: Center(
-          child: Text(
-            _formatScore(_state.score),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 34,
-              fontWeight: FontWeight.w800,
-              shadows: [
-                Shadow(
-                  blurRadius: 8,
-                  color: Colors.black26,
-                  offset: Offset(0, 2),
+        child: Padding(
+          padding: const EdgeInsets.only(top: 20),
+          child: Column(
+            children: [
+              Text(
+                _formatScore(_state.score),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 38,
+                  fontWeight: FontWeight.w900,
+                  height: 1,
+                  shadows: [
+                    Shadow(
+                      blurRadius: 8,
+                      color: Colors.black26,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 4),
+              if (_state.best > 0)
+                Text(
+                  'BEST ${_formatScore(_state.best)}',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.75),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+            ],
           ),
         ),
       ),
@@ -288,40 +520,69 @@ class _GameScreenState extends State<GameScreen>
               fontSize: 44,
               fontWeight: FontWeight.w900,
               shadows: [
-                Shadow(blurRadius: 14, color: Colors.black38, offset: Offset(0, 3)),
+                Shadow(
+                  blurRadius: 14,
+                  color: Colors.black38,
+                  offset: Offset(0, 3),
+                ),
               ],
             ),
+          ),
+          const SizedBox(height: 22),
+          FilledButton(
+            onPressed: _startGame,
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: const Color(0xFF2E7D32),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 46, vertical: 16),
+              textStyle: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(40),
+              ),
+            ),
+            child: const Text('Tap to Start'),
           ),
           const SizedBox(height: 18),
           Text(
-            'Tap or press Space to start',
+            _tiltAvailable
+                ? 'Tilt your phone to steer'
+                : 'Hold the left / right side of the screen to steer',
             style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
+              color: Colors.white.withOpacity(0.9),
+              fontSize: 15,
               fontWeight: FontWeight.w600,
               shadows: const [
-                Shadow(blurRadius: 8, color: Colors.black26),
+                Shadow(blurRadius: 6, color: Colors.black26),
               ],
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Text(
-            'Hold the left / right side of the screen to steer',
+            'Ride the springs. Avoid cracked platforms!',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.85),
+              color: Colors.white.withOpacity(0.7),
               fontSize: 13,
             ),
           ),
+          const SizedBox(height: 26),
+          _buildSoundToggle(),
         ],
       ),
     );
   }
 
   Widget _buildGameOverOverlay() {
+    final isNewBest = _state.score >= _state.best &&
+        _state.score > 0 &&
+        _state.best > 0;
     return Center(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 48),
-        padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 28),
+        margin: const EdgeInsets.symmetric(horizontal: 44),
+        padding: const EdgeInsets.symmetric(horizontal: 34, vertical: 26),
         decoration: BoxDecoration(
           color: Colors.black.withOpacity(0.45),
           borderRadius: BorderRadius.circular(24),
@@ -333,11 +594,24 @@ class _GameScreenState extends State<GameScreen>
               'Game Over',
               style: TextStyle(
                 color: Colors.white,
-                fontSize: 32,
+                fontSize: 30,
                 fontWeight: FontWeight.w900,
               ),
             ),
-            const SizedBox(height: 18),
+            if (isNewBest)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'NEW BEST!',
+                  style: TextStyle(
+                    color: const Color(0xFFFFD54F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 2,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 16),
             Text(
               'Score   ${_formatScore(_state.score)}',
               style: const TextStyle(
@@ -351,27 +625,50 @@ class _GameScreenState extends State<GameScreen>
               'Best   ${_formatScore(_state.best)}',
               style: TextStyle(
                 color: Colors.white.withOpacity(0.8),
-                fontSize: 16,
+                fontSize: 15,
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 22),
             FilledButton(
               onPressed: _startGame,
               style: FilledButton.styleFrom(
                 backgroundColor: const Color(0xFF2E7D32),
                 foregroundColor: Colors.white,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+                    const EdgeInsets.symmetric(horizontal: 32, vertical: 13),
                 textStyle: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
               child: const Text('Play Again'),
             ),
+            const SizedBox(height: 14),
+            _buildSoundToggle(),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildSoundToggle() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          _state.soundOn ? Icons.music_note : Icons.music_off,
+          color: Colors.white.withOpacity(0.9),
+          size: 18,
+        ),
+        const SizedBox(width: 8),
+        Switch(
+          value: _state.soundOn,
+          onChanged: (_) => _toggleSound(),
+          activeThumbColor: Colors.white,
+          activeTrackColor: const Color(0xFF2E7D32),
+          inactiveThumbColor: Colors.white24,
+        ),
+      ],
     );
   }
 

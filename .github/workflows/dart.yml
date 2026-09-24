@@ -9,6 +9,19 @@ jobs:
         with:
           channel: stable
       - run: flutter create . --project-name doodle_jump
+      - name: Set app display name and lock portrait
+        run: |
+          plist="ios/Runner/Info.plist"
+          plutil -replace CFBundleDisplayName -string "Doodle Jump" "$plist" \
+            || plutil -insert CFBundleDisplayName -string "Doodle Jump" "$plist"
+          plutil -replace UISupportedInterfaceOrientations \
+            -json '["UIInterfaceOrientationPortrait"]' "$plist" \
+            || plutil -insert UISupportedInterfaceOrientations \
+            -json '["UIInterfaceOrientationPortrait"]' "$plist"
+          plutil -replace 'UISupportedInterfaceOrientations~ipad' \
+            -json '["UIInterfaceOrientationPortrait"]' "$plist" || true
+          echo "--- Info.plist orientation settings ---"
+          plutil -p "$plist" | grep -i orient || true
       - run: flutter pub get
       - run: flutter test
       - run: flutter build ipa --no-codesign

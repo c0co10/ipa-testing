@@ -7,6 +7,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('Doodle Jump'), findsOneWidget);
-    expect(find.text('Tap or press Space to start'), findsOneWidget);
+    expect(find.text('Tap to Start'), findsOneWidget);
+    expect(find.textContaining('Ride the springs'), findsOneWidget);
   });
 }
