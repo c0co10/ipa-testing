@@ -284,12 +284,17 @@ class _GameScreenState extends State<GameScreen>
 
     if (player.vy > 0) {
       final bottom = player.y + kPlayerHeight;
+      final centerX = player.x + kPlayerWidth / 2;
       for (final platform in _state.platforms) {
+        if (platform.isBroken) continue;
         final plBottom = platform.y; // top edge of platform (y is top)
         if (prevBottom <= plBottom && bottom >= plBottom) {
-          final overlapping = player.x + kPlayerWidth > platform.x &&
-              player.x < platform.x + kPlatformWidth;
-          if (overlapping && platform.hasSpring) {
+          // Only count a real landing: the player's horizontal center must
+          // be over the platform. A 1px corner graze is not a jump.
+          final centerOver = centerX > platform.x &&
+              centerX < platform.x + kPlatformWidth;
+          if (!centerOver) continue;
+          if (platform.hasSpring) {
             _audio.spring();
             _state.shake = math.max(_state.shake, 5);
             _burst(
@@ -305,37 +310,35 @@ class _GameScreenState extends State<GameScreen>
             platform.hasSpring = false;
             break;
           }
-          if (overlapping) {
-            _audio.jump();
-            player.y = plBottom - kPlayerHeight;
-            player.vy = kJumpVelocity;
-            if (platform.breakable && !platform.isBroken) {
-              platform.isBroken = true;
-              _audio.breakPlatform();
-              _state.shake = math.max(_state.shake, 4);
-              _burst(
-                platform.x + kPlatformWidth / 2,
-                plBottom,
-                GamePalette.breakableBottom,
-                10,
-                140,
-                upward: 140,
-              );
-            } else {
-              final color = platform.moving
-                  ? GamePalette.movingTop
-                  : GamePalette.platformTop;
-              _burst(
-                platform.x + kPlatformWidth / 2,
-                plBottom,
-                color,
-                6,
-                90,
-                upward: 40,
-              );
-            }
-            break;
+          _audio.jump();
+          player.y = plBottom - kPlayerHeight;
+          player.vy = kJumpVelocity;
+          if (platform.breakable && !platform.isBroken) {
+            platform.isBroken = true;
+            _audio.breakPlatform();
+            _state.shake = math.max(_state.shake, 4);
+            _burst(
+              platform.x + kPlatformWidth / 2,
+              plBottom,
+              GamePalette.breakableBottom,
+              10,
+              140,
+              upward: 140,
+            );
+          } else {
+            final color = platform.moving
+                ? GamePalette.movingTop
+                : GamePalette.platformTop;
+            _burst(
+              platform.x + kPlatformWidth / 2,
+              plBottom,
+              color,
+              6,
+              90,
+              upward: 40,
+            );
           }
+          break;
         }
       }
     }
