@@ -18,29 +18,33 @@ jobs:
           APP="$(find build/ios/archive -type d -name '*.app' 2>/dev/null | head -1 || true)"
           echo "Found app bundle: ${APP:-none}"
           IPK=""
-          if [ -d "build/ios/archive/Runner.xcarchive" ] && xcodebuild -exportArchive \
-              -archivePath build/ios/archive/Runner.xcarchive \
-              -exportPath build/ios/export \
-              -exportOptionsPlist <(cat <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>method</key>
-  <string>development</string>
-  <key>signingStyle</key>
-  <string>manual</string>
-  <key>signingCertificate</key>
-  <string>-</string>
-</dict>
-</plist>
-EOF
-) CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO > export.log 2>&1; then
-            IPK="$(find build/ios/export -name '*.ipa' 2>/dev/null | head -1 || true)"
-            echo "xcodebuild export OK: ${IPK:-none}"
-          else
-            echo "xcodebuild export failed, falling back to manual packaging:"
-            tail -20 export.log 2>/dev/null || true
+          if [ -d "build/ios/archive/Runner.xcarchive" ]; then
+            cat > ExportOptions.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>-</string>
+          </dict>
+          </plist>
+          EOF
+            echo "Exporting archive..."
+            if xcodebuild -exportArchive \
+                -archivePath build/ios/archive/Runner.xcarchive \
+                -exportPath build/ios/export \
+                -exportOptionsPlist ExportOptions.plist \
+                CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO > export.log 2>&1; then
+              IPK="$(find build/ios/export -name '*.ipa' 2>/dev/null | head -1 || true)"
+              echo "xcodebuild export OK: ${IPK:-none}"
+            else
+              echo "xcodebuild export failed:"
+              tail -20 export.log 2>/dev/null || true
+            fi
           fi
           if [ -z "$IPK" ] && [ -n "$APP" ]; then
             echo "Packaging Payload manually"
@@ -52,7 +56,9 @@ EOF
             echo "Manual packaging OK"
           fi
           if [ -n "$IPK" ]; then
-            cp "$IPK" build/ios/Runner.ipa
+            if [ "$IPK" != "build/ios/Runner.ipa" ]; then
+              cp "$IPK" build/ios/Runner.ipa
+            fi
             ls -la build/ios/Runner.ipa
           else
             echo "NO IPA PRODUCED"
